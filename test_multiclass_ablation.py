@@ -225,12 +225,19 @@ def main():
         print(f"  Evaluating Variant {key}: {ablation_cfg.description}")
         print(f"{'═' * 70}")
 
-        checkpoint_path = (
-            Path(args.checkpoint_dir)
-            / f"ablation_multiclass_{key}"
-            / f"{key}_baseline"
-            / "best.pt"
-        )
+        base_variant_dir = Path(args.checkpoint_dir) / f"ablation_multiclass_{key}"
+        if not base_variant_dir.exists():
+            print(f"  [ERROR] Variant directory not found at {base_variant_dir}")
+            continue
+
+        subfolders = [d for d in base_variant_dir.iterdir() if d.is_dir()]
+        if not subfolders:
+            print(f"  [ERROR] No subfolders found in {base_variant_dir}")
+            continue
+
+        # Dynamically use the only subfolder present
+        checkpoint_path = subfolders[0] / "best.pt"
+
         if not checkpoint_path.exists():
             print(f"  [ERROR] Checkpoint not found at {checkpoint_path}")
             continue
