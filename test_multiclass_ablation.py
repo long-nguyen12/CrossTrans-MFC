@@ -259,9 +259,16 @@ def main():
 
         metrics = evaluate(model, loader, device, desc=f"Evaluating {key}")
 
-        print(f"  Test Coarse F1 (macro): {metrics['coarse_f1']:.4f}")
-        print(f"  Test Fine Acc:          {metrics['fine_acc']:.4f}")
-        print(f"  Test Fine F1 (macro):   {metrics['fine_f1']:.4f}")
+        print(f"  --- Coarse Metrics ---")
+        print(f"  Accuracy:  {metrics['coarse_acc']:.4f}")
+        print(f"  Precision: {metrics['coarse_precision']:.4f}")
+        print(f"  Recall:    {metrics['coarse_recall']:.4f}")
+        print(f"  F1:        {metrics['coarse_f1']:.4f}")
+        print(f"  --- Fine Metrics ---")
+        print(f"  Accuracy:  {metrics['fine_acc']:.4f}")
+        print(f"  Precision: {metrics['fine_precision']:.4f}")
+        print(f"  Recall:    {metrics['fine_recall']:.4f}")
+        print(f"  F1:        {metrics['fine_f1']:.4f}")
 
         result_dict = {
             "variant": key,
@@ -332,19 +339,28 @@ def main():
         return
 
     # ── Summary table ──
-    print(f"\n{'═' * 90}")
+    print(f"\n{'═' * 130}")
     print(f"  MULTICLASS ABLATION EVALUATION SUMMARY ({args.split.upper()} SPLIT)")
-    print(f"{'═' * 90}")
+    print(f"{'═' * 130}")
     print(
-        f"{'Variant':<8} {'Description':<45} {'Coarse F1':>10} {'Fine Acc':>10} {'Fine F1':>10}"
+        f"{'Variant':<8} {'Description':<45} "
+        f"{'C-Acc':>7} {'C-Prec':>7} {'C-Rec':>7} {'C-F1':>7} | "
+        f"{'F-Acc':>7} {'F-Prec':>7} {'F-Rec':>7} {'F-F1':>7}"
     )
-    print(f"{'─' * 8} {'─' * 45} {'─' * 10} {'─' * 10} {'─' * 10}")
+    print(
+        f"{'─' * 8} {'─' * 45} "
+        f"{'─' * 7} {'─' * 7} {'─' * 7} {'─' * 7}   "
+        f"{'─' * 7} {'─' * 7} {'─' * 7} {'─' * 7}"
+    )
     for r in all_results:
         print(
             f"{r['variant']:<8} {r['description']:<45} "
-            f"{r['coarse_f1']:>10.4f} {r['fine_accuracy']:>10.4f} {r['fine_f1']:>10.4f}"
+            f"{r['coarse_accuracy']:>7.4f} {r['coarse_precision']:>7.4f} "
+            f"{r['coarse_recall']:>7.4f} {r['coarse_f1']:>7.4f} | "
+            f"{r['fine_accuracy']:>7.4f} {r['fine_precision']:>7.4f} "
+            f"{r['fine_recall']:>7.4f} {r['fine_f1']:>7.4f}"
         )
-    print(f"{'═' * 90}\n")
+    print(f"{'═' * 130}\n")
 
     # Save summary
     summary_json_path = out_dir / f"ablation_evaluation_summary_{args.split}.json"
@@ -357,17 +373,20 @@ def main():
             f"# Multiclass Ablation Evaluation Results ({args.split.title()} Split)\n\n"
         )
         f.write(
-            "| Variant | Description | Params | Coarse F1 | Fine Acc | Fine F1 | Consistency |\n"
+            "| Variant | Description | Params | Coarse Acc | Coarse Prec | Coarse Rec | Coarse F1 | Fine Acc | Fine Prec | Fine Rec | Fine F1 | Consistency |\n"
         )
         f.write(
-            "|---------|-------------|--------|-----------|----------|---------|-------------|\n"
+            "|---------|-------------|--------|------------|-------------|------------|-----------|----------|-----------|----------|---------|-------------|\n"
         )
         for r in all_results:
             f.write(
                 f"| {r['variant']} | {r['description']} | "
                 f"{r['trainable_params']:,} | "
-                f"{r['coarse_f1']:.4f} | {r['fine_accuracy']:.4f} | "
-                f"{r['fine_f1']:.4f} | {r['hierarchical_consistency']:.4f} |\n"
+                f"{r['coarse_accuracy']:.4f} | {r['coarse_precision']:.4f} | "
+                f"{r['coarse_recall']:.4f} | {r['coarse_f1']:.4f} | "
+                f"{r['fine_accuracy']:.4f} | {r['fine_precision']:.4f} | "
+                f"{r['fine_recall']:.4f} | {r['fine_f1']:.4f} | "
+                f"{r['hierarchical_consistency']:.4f} |\n"
             )
 
     print(f"✓ Output saved to {out_dir}")
