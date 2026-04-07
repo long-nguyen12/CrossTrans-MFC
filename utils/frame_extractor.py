@@ -390,8 +390,6 @@ def katna_process_folder(args):
         for i, video_id in tqdm(
             enumerate(video_ids), total=len(video_ids), desc="Processing videos"
         ):
-            if i == 10:
-                break
             try:
                 logging.info(f"Processing video {i + 1}/{len(video_ids)}: {video_id}")
                 video_file = None
