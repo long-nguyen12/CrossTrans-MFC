@@ -492,5 +492,5 @@ if __name__ == "__main__":
         help="Dir with pre-extracted video feature .pt files",
     )
     args = parser.parse_args()
-    process_folder_videos(args)
-    # katna_process_folder(args)
+    # process_folder_videos(args)
+    katna_process_folder(args)
