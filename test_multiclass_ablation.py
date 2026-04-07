@@ -65,7 +65,7 @@ def load_checkpoint(path: Path, device: torch.device):
 
 def build_cfg_from_checkpoint(checkpoint: dict) -> MMConfig:
     cfg_dict = checkpoint.get("cfg", {})
-    if not cfg_dict and "model_config" in checkpoint: # fallback
+    if not cfg_dict and "model_config" in checkpoint:  # fallback
         cfg_dict = checkpoint["model_config"]
     elif not cfg_dict:
         raise KeyError("Checkpoint does not contain 'cfg' or 'model_config'.")
@@ -112,15 +112,27 @@ def evaluate(model, loader, device, desc="Testing"):
 
     # Coarse metrics
     coarse_acc = accuracy_score(all_coarse_true, all_coarse_pred)
-    coarse_prec = precision_score(all_coarse_true, all_coarse_pred, average="macro", zero_division=0)
-    coarse_rec = recall_score(all_coarse_true, all_coarse_pred, average="macro", zero_division=0)
-    coarse_f1 = f1_score(all_coarse_true, all_coarse_pred, average="macro", zero_division=0)
+    coarse_prec = precision_score(
+        all_coarse_true, all_coarse_pred, average="macro", zero_division=0
+    )
+    coarse_rec = recall_score(
+        all_coarse_true, all_coarse_pred, average="macro", zero_division=0
+    )
+    coarse_f1 = f1_score(
+        all_coarse_true, all_coarse_pred, average="macro", zero_division=0
+    )
 
     # Fine metrics
     fine_acc = accuracy_score(all_flat_fine_true, all_flat_fine_pred)
-    fine_prec = precision_score(all_flat_fine_true, all_flat_fine_pred, average="macro", zero_division=0)
-    fine_rec = recall_score(all_flat_fine_true, all_flat_fine_pred, average="macro", zero_division=0)
-    fine_f1 = f1_score(all_flat_fine_true, all_flat_fine_pred, average="macro", zero_division=0)
+    fine_prec = precision_score(
+        all_flat_fine_true, all_flat_fine_pred, average="macro", zero_division=0
+    )
+    fine_rec = recall_score(
+        all_flat_fine_true, all_flat_fine_pred, average="macro", zero_division=0
+    )
+    fine_f1 = f1_score(
+        all_flat_fine_true, all_flat_fine_pred, average="macro", zero_division=0
+    )
 
     # Hierarchical consistency
     consistent = sum(1 for ct, cp in zip(all_coarse_true, all_coarse_pred) if ct == cp)
@@ -148,35 +160,56 @@ def main():
         description="Evaluate hierarchical multi-class ablation study checkpoint."
     )
     parser.add_argument(
-        "--checkpoint", type=str, required=True,
+        "--checkpoint",
+        type=str,
+        default="./checkpoints/",
         help="Path to .pt checkpoint",
     )
     parser.add_argument(
-        "--variant", type=str, required=True,
-        help="Ablation variant key (e.g. A, B, C, D) used for evaluation",
+        "--variant",
+        type=str,
+        default=None,
+        help="Ablation variant key (e.g. A, B, C, D). If not provided, it will be deduced from the checkpoint path's parent directory.",
     )
     parser.add_argument("--data-root", type=str, default="./data/TRUE_Dataset")
     parser.add_argument(
-        "--split", type=str, default="test",
+        "--split",
+        type=str,
+        default="test",
         choices=["train", "val", "test"],
     )
-    parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--num-workers", type=int, default=4)
-    parser.add_argument("--output", type=str, default="")
+    parser.add_argument("--output", type=str, default="ablation_results.json")
     args = parser.parse_args()
 
-    variant_key = args.variant.upper()
+    checkpoint_path = Path(args.checkpoint)
+
+    if args.variant is not None:
+        variant_key = args.variant.upper()
+    else:
+        # Try to deduce from the checkpoint directory, which looks like "ablation_multiclass_A"
+        dir_name = checkpoint_path.parent.name
+        if dir_name.startswith("ablation_multiclass_"):
+            variant_key = dir_name.split("_")[-1].upper()
+        elif dir_name.startswith("ablation_"):
+            variant_key = dir_name.split("_")[-1].upper()
+        else:
+            raise ValueError(
+                f"Could not deduce variant from path '{checkpoint_path}'. Please specify --variant explicitly."
+            )
+
     if variant_key not in ABLATION_VARIANTS:
-        raise ValueError(f"Unknown variant '{variant_key}'. Valid variants are: {list(ABLATION_VARIANTS.keys())}")
+        raise ValueError(
+            f"Unknown variant '{variant_key}'. Valid variants are: {list(ABLATION_VARIANTS.keys())}"
+        )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     checkpoint_path = Path(args.checkpoint)
     checkpoint = load_checkpoint(checkpoint_path, device)
 
     cfg = build_cfg_from_checkpoint(checkpoint)
-    num_fine = tuple(
-        checkpoint.get("num_fine_per_coarse", list(NUM_FINE_PER_COARSE))
-    )
+    num_fine = tuple(checkpoint.get("num_fine_per_coarse", list(NUM_FINE_PER_COARSE)))
 
     ablation_cfg = ABLATION_VARIANTS[variant_key]
     model = AblationModel(cfg, ablation_cfg, num_fine_per_coarse=num_fine).to(device)
@@ -184,7 +217,7 @@ def main():
 
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    model_size_mb = total_params * 4 / (1024 ** 2)
+    model_size_mb = total_params * 4 / (1024**2)
     print(f"\nVariant: {variant_key} ({ablation_cfg.description})")
     print(f"Total parameters: {total_params:,}")
     print(f"Trainable parameters: {trainable_params:,}")
@@ -207,7 +240,9 @@ def main():
     print(f"Samples: {len(loader.dataset)}")
 
     # Evaluate
-    metrics = evaluate(model, loader, device, desc=f"Evaluating {args.split} for {variant_key}")
+    metrics = evaluate(
+        model, loader, device, desc=f"Evaluating {args.split} for {variant_key}"
+    )
 
     # Print results
     print(f"\n{'=' * 70}")
@@ -260,7 +295,10 @@ def main():
         print(f"{fine_names[i]:<10}{row_str}")
 
     # Save log
-    log_path = checkpoint_path.parent / f"evaluation_{args.split}_{checkpoint_path.stem}_multiclass_ablation_{variant_key}.txt"
+    log_path = (
+        checkpoint_path.parent
+        / f"evaluation_{args.split}_{checkpoint_path.stem}_multiclass_ablation_{variant_key}.txt"
+    )
     with open(log_path, "w", encoding="utf-8") as f:
         f.write(f"Evaluating split: {args.split}\n")
         f.write(f"Variant: {variant_key} ({ablation_cfg.description})\n")
