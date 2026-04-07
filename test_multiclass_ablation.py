@@ -1,13 +1,17 @@
 """
-Evaluate a trained hierarchical multi-class ablation study checkpoint for CrossTransVFC.
+Evaluate trained hierarchical multi-class ablation study checkpoints for CrossTransVFC.
 
-Re-constructs the specific ablation variant Architecture and reports metrics at two levels:
+Re-constructs the specific ablation variant Architectures and reports metrics at two levels:
   - Coarse: binary TRUE/FALSE accuracy, F1, precision, recall
   - Fine-grained: 8-class accuracy, macro F1, per-class metrics
   - Hierarchical consistency
 
+Iterates through all ablation variants (or customized list) and generates a summary table.
+
 Usage:
-    python test_multiclass_ablation.py --checkpoint checkpoints/ablation_multiclass_B/best.pt --variant B
+    python test_multiclass_ablation.py
+    python test_multiclass_ablation.py --checkpoint-dir checkpoints
+    python test_multiclass_ablation.py --variants B C
 """
 
 import argparse
@@ -81,7 +85,7 @@ def evaluate(model, loader, device, desc="Testing"):
     all_coarse_true, all_coarse_pred = [], []
     all_flat_fine_true, all_flat_fine_pred = [], []
 
-    for batch in tqdm(loader, desc=desc):
+    for batch in tqdm(loader, desc=desc, leave=False):
         coarse_labels = normalize_labels(batch["label"]).to(device)
         fine_labels = batch["fine_label"].to(device)
         flat_fine_labels = batch["flat_fine_label"].to(device)
@@ -157,19 +161,19 @@ def evaluate(model, loader, device, desc="Testing"):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Evaluate hierarchical multi-class ablation study checkpoint."
+        description="Evaluate hierarchical multi-class ablation study checkpoints."
     )
     parser.add_argument(
-        "--checkpoint",
+        "--checkpoint-dir",
         type=str,
-        default="./checkpoints/",
-        help="Path to .pt checkpoint",
+        default="./checkpoints",
+        help="Path to the directory containing ablation checkpoints",
     )
     parser.add_argument(
-        "--variant",
-        type=str,
+        "--variants",
+        nargs="*",
         default=None,
-        help="Ablation variant key (e.g. A, B, C, D). If not provided, it will be deduced from the checkpoint path's parent directory.",
+        help="List of variants to evaluate (e.g. A B C). Default: all variants in ABLATION_VARIANTS.",
     )
     parser.add_argument("--data-root", type=str, default="./data/TRUE_Dataset")
     parser.add_argument(
@@ -180,50 +184,19 @@ def main():
     )
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--num-workers", type=int, default=4)
-    parser.add_argument("--output", type=str, default="ablation_results.json")
+    parser.add_argument("--output-dir", type=str, default="./results")
     args = parser.parse_args()
 
-    checkpoint_path = Path(args.checkpoint)
-
-    if args.variant is not None:
-        variant_key = args.variant.upper()
+    if args.variants:
+        variant_keys = [v.upper() for v in args.variants]
     else:
-        # Try to deduce from the checkpoint directory, which looks like "ablation_multiclass_A"
-        dir_name = checkpoint_path.parent.name
-        if dir_name.startswith("ablation_multiclass_"):
-            variant_key = dir_name.split("_")[-1].upper()
-        elif dir_name.startswith("ablation_"):
-            variant_key = dir_name.split("_")[-1].upper()
-        else:
-            raise ValueError(
-                f"Could not deduce variant from path '{checkpoint_path}'. Please specify --variant explicitly."
-            )
-
-    if variant_key not in ABLATION_VARIANTS:
-        raise ValueError(
-            f"Unknown variant '{variant_key}'. Valid variants are: {list(ABLATION_VARIANTS.keys())}"
-        )
+        variant_keys = list(ABLATION_VARIANTS.keys())
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    checkpoint_path = Path(args.checkpoint)
-    checkpoint = load_checkpoint(checkpoint_path, device)
+    print(f"Using device: {device}")
 
-    cfg = build_cfg_from_checkpoint(checkpoint)
-    num_fine = tuple(checkpoint.get("num_fine_per_coarse", list(NUM_FINE_PER_COARSE)))
-
-    ablation_cfg = ABLATION_VARIANTS[variant_key]
-    model = AblationModel(cfg, ablation_cfg, num_fine_per_coarse=num_fine).to(device)
-    model.load_state_dict(checkpoint["state_dict"], strict=True)
-
-    total_params = sum(p.numel() for p in model.parameters())
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    model_size_mb = total_params * 4 / (1024**2)
-    print(f"\nVariant: {variant_key} ({ablation_cfg.description})")
-    print(f"Total parameters: {total_params:,}")
-    print(f"Trainable parameters: {trainable_params:,}")
-    print(f"Model size (FP32 dtype): {model_size_mb:.2f} MB")
-
-    # Load data
+    # Load data once
+    print("Loading datasets...")
     train_loader, val_loader, test_loader = create_dataloaders(
         path=args.data_root,
         batch_size=args.batch_size,
@@ -234,99 +207,57 @@ def main():
     loader_map = {"train": train_loader, "val": val_loader, "test": test_loader}
     loader = loader_map[args.split]
 
-    print(f"Using device: {device}")
-    print(f"Loaded checkpoint: {checkpoint_path}")
-    print(f"Evaluating split: {args.split}")
-    print(f"Samples: {len(loader.dataset)}")
+    print(f"Evaluating split: {args.split} ({len(loader.dataset)} samples)")
+    print(f"Evaluating variants: {variant_keys}\n")
 
-    # Evaluate
-    metrics = evaluate(
-        model, loader, device, desc=f"Evaluating {args.split} for {variant_key}"
-    )
+    out_dir = Path(args.output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Print results
-    print(f"\n{'=' * 70}")
-    print("COARSE (Binary) Results:")
-    print(f"{'=' * 70}")
-    print(f"  Accuracy: {metrics['coarse_acc']:.4f}")
-    print(f"  Precision (macro): {metrics['coarse_precision']:.4f}")
-    print(f"  Recall (macro): {metrics['coarse_recall']:.4f}")
-    print(f"  F1 (macro): {metrics['coarse_f1']:.4f}")
+    all_results = []
 
-    coarse_report = classification_report(
-        metrics["coarse_true"],
-        metrics["coarse_pred"],
-        target_names=[COARSE_LABELS[i] for i in range(2)],
-        digits=4,
-        zero_division=0,
-    )
-    print(coarse_report)
+    for key in variant_keys:
+        if key not in ABLATION_VARIANTS:
+            print(f"WARNING: Unknown variant '{key}', skipping.")
+            continue
 
-    print(f"\n{'=' * 70}")
-    print("FINE-GRAINED (8-class) Results:")
-    print(f"{'=' * 70}")
-    print(f"  Accuracy: {metrics['fine_acc']:.4f}")
-    print(f"  Precision (macro): {metrics['fine_precision']:.4f}")
-    print(f"  Recall (macro): {metrics['fine_recall']:.4f}")
-    print(f"  F1 (macro): {metrics['fine_f1']:.4f}")
-    print(f"  Hierarchical Consistency: {metrics['consistency']:.4f}")
+        ablation_cfg = ABLATION_VARIANTS[key]
+        print(f"\n{'═' * 70}")
+        print(f"  Evaluating Variant {key}: {ablation_cfg.description}")
+        print(f"{'═' * 70}")
 
-    fine_report = classification_report(
-        metrics["flat_fine_true"],
-        metrics["flat_fine_pred"],
-        target_names=[FINE_LABELS[i] for i in range(TOTAL_FINE_CLASSES)],
-        digits=4,
-        zero_division=0,
-    )
-    print(fine_report)
+        checkpoint_path = (
+            Path(args.checkpoint_dir) / f"ablation_multiclass_{key}" / "best.pt"
+        )
+        if not checkpoint_path.exists():
+            print(f"  [ERROR] Checkpoint not found at {checkpoint_path}")
+            continue
 
-    # Confusion matrix
-    print("\nFine-grained Confusion Matrix:")
-    cm = confusion_matrix(
-        metrics["flat_fine_true"],
-        metrics["flat_fine_pred"],
-        labels=list(range(TOTAL_FINE_CLASSES)),
-    )
-    fine_names = [FINE_LABELS[i] for i in range(TOTAL_FINE_CLASSES)]
-    header = "          " + " ".join(f"{n[:6]:>6}" for n in fine_names)
-    print(header)
-    for i, row in enumerate(cm):
-        row_str = " ".join(f"{v:6d}" for v in row)
-        print(f"{fine_names[i]:<10}{row_str}")
+        print(f"  Loading {checkpoint_path}...")
+        checkpoint = load_checkpoint(checkpoint_path, device)
+        cfg = build_cfg_from_checkpoint(checkpoint)
+        num_fine = tuple(
+            checkpoint.get("num_fine_per_coarse", list(NUM_FINE_PER_COARSE))
+        )
 
-    # Save log
-    log_path = (
-        checkpoint_path.parent
-        / f"evaluation_{args.split}_{checkpoint_path.stem}_multiclass_ablation_{variant_key}.txt"
-    )
-    with open(log_path, "w", encoding="utf-8") as f:
-        f.write(f"Evaluating split: {args.split}\n")
-        f.write(f"Variant: {variant_key} ({ablation_cfg.description})\n")
-        f.write(f"Loaded checkpoint: {checkpoint_path}\n\n")
-        f.write("=== COARSE (Binary) ===\n")
-        f.write(f"Accuracy: {metrics['coarse_acc']:.4f}\n")
-        f.write(f"Precision (macro): {metrics['coarse_precision']:.4f}\n")
-        f.write(f"Recall (macro): {metrics['coarse_recall']:.4f}\n")
-        f.write(f"F1 (macro): {metrics['coarse_f1']:.4f}\n")
-        f.write(coarse_report + "\n\n")
-        f.write("=== FINE-GRAINED (8-class) ===\n")
-        f.write(f"Accuracy: {metrics['fine_acc']:.4f}\n")
-        f.write(f"Precision (macro): {metrics['fine_precision']:.4f}\n")
-        f.write(f"Recall (macro): {metrics['fine_recall']:.4f}\n")
-        f.write(f"F1 (macro): {metrics['fine_f1']:.4f}\n")
-        f.write(f"Hierarchical Consistency: {metrics['consistency']:.4f}\n")
-        f.write(fine_report + "\n")
-    print(f"\nSaved evaluation log to: {log_path}")
+        model = AblationModel(cfg, ablation_cfg, num_fine_per_coarse=num_fine).to(
+            device
+        )
+        model.load_state_dict(checkpoint["state_dict"], strict=True)
 
-    # Save JSON output
-    if args.output:
-        out_path = Path(args.output)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "checkpoint": str(checkpoint_path),
-            "variant": variant_key,
+        total_params = sum(p.numel() for p in model.parameters())
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+        metrics = evaluate(model, loader, device, desc=f"Evaluating {key}")
+
+        print(f"  Test Coarse F1 (macro): {metrics['coarse_f1']:.4f}")
+        print(f"  Test Fine Acc:          {metrics['fine_acc']:.4f}")
+        print(f"  Test Fine F1 (macro):   {metrics['fine_f1']:.4f}")
+
+        result_dict = {
+            "variant": key,
             "description": ablation_cfg.description,
-            "split": args.split,
+            "total_params": total_params,
+            "trainable_params": trainable_params,
             "coarse_accuracy": float(metrics["coarse_acc"]),
             "coarse_precision": float(metrics["coarse_precision"]),
             "coarse_recall": float(metrics["coarse_recall"]),
@@ -336,15 +267,100 @@ def main():
             "fine_recall": float(metrics["fine_recall"]),
             "fine_f1": float(metrics["fine_f1"]),
             "hierarchical_consistency": float(metrics["consistency"]),
-            "n_samples": len(loader.dataset),
-            "coarse_predictions": metrics["coarse_pred"],
-            "coarse_true_labels": metrics["coarse_true"],
-            "fine_predictions": metrics["flat_fine_pred"],
-            "fine_true_labels": metrics["flat_fine_true"],
         }
-        with open(out_path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
-        print(f"Saved output to: {out_path}")
+        all_results.append(result_dict)
+
+        # Save per-variant full report
+        variant_log_path = (
+            out_dir / f"evaluation_{args.split}_multiclass_ablation_{key}.txt"
+        )
+        with open(variant_log_path, "w", encoding="utf-8") as f:
+            f.write(f"Evaluating split: {args.split}\n")
+            f.write(f"Variant: {key} ({ablation_cfg.description})\n")
+            f.write(f"Loaded checkpoint: {checkpoint_path}\n\n")
+            f.write("=== COARSE (Binary) ===\n")
+            f.write(f"Accuracy: {metrics['coarse_acc']:.4f}\n")
+            f.write(f"Precision (macro): {metrics['coarse_precision']:.4f}\n")
+            f.write(f"Recall (macro): {metrics['coarse_recall']:.4f}\n")
+            f.write(f"F1 (macro): {metrics['coarse_f1']:.4f}\n\n")
+            f.write("=== FINE-GRAINED (8-class) ===\n")
+            f.write(f"Accuracy: {metrics['fine_acc']:.4f}\n")
+            f.write(f"Precision (macro): {metrics['fine_precision']:.4f}\n")
+            f.write(f"Recall (macro): {metrics['fine_recall']:.4f}\n")
+            f.write(f"F1 (macro): {metrics['fine_f1']:.4f}\n")
+            f.write(f"Hierarchical Consistency: {metrics['consistency']:.4f}\n\n")
+
+            f.write("=== COARSE Classification Report ===\n")
+            f.write(
+                classification_report(
+                    metrics["coarse_true"],
+                    metrics["coarse_pred"],
+                    target_names=[COARSE_LABELS[i] for i in range(2)],
+                    digits=4,
+                    zero_division=0,
+                )
+                + "\n"
+            )
+
+            f.write("=== FINE-GRAINED Classification Report ===\n")
+            f.write(
+                classification_report(
+                    metrics["flat_fine_true"],
+                    metrics["flat_fine_pred"],
+                    target_names=[FINE_LABELS[i] for i in range(TOTAL_FINE_CLASSES)],
+                    digits=4,
+                    zero_division=0,
+                )
+                + "\n"
+            )
+
+        del model
+        torch.cuda.empty_cache()
+
+    if not all_results:
+        print("\nNo variants were evaluated (checkpoints might be missing).")
+        return
+
+    # ── Summary table ──
+    print(f"\n{'═' * 90}")
+    print(f"  MULTICLASS ABLATION EVALUATION SUMMARY ({args.split.upper()} SPLIT)")
+    print(f"{'═' * 90}")
+    print(
+        f"{'Variant':<8} {'Description':<45} {'Coarse F1':>10} {'Fine Acc':>10} {'Fine F1':>10}"
+    )
+    print(f"{'─' * 8} {'─' * 45} {'─' * 10} {'─' * 10} {'─' * 10}")
+    for r in all_results:
+        print(
+            f"{r['variant']:<8} {r['description']:<45} "
+            f"{r['coarse_f1']:>10.4f} {r['fine_accuracy']:>10.4f} {r['fine_f1']:>10.4f}"
+        )
+    print(f"{'═' * 90}\n")
+
+    # Save summary
+    summary_json_path = out_dir / f"ablation_evaluation_summary_{args.split}.json"
+    with open(summary_json_path, "w") as f:
+        json.dump(all_results, f, indent=2)
+
+    summary_md_path = out_dir / f"ablation_evaluation_summary_{args.split}.md"
+    with open(summary_md_path, "w") as f:
+        f.write(
+            f"# Multiclass Ablation Evaluation Results ({args.split.title()} Split)\n\n"
+        )
+        f.write(
+            "| Variant | Description | Params | Coarse F1 | Fine Acc | Fine F1 | Consistency |\n"
+        )
+        f.write(
+            "|---------|-------------|--------|-----------|----------|---------|-------------|\n"
+        )
+        for r in all_results:
+            f.write(
+                f"| {r['variant']} | {r['description']} | "
+                f"{r['trainable_params']:,} | "
+                f"{r['coarse_f1']:.4f} | {r['fine_accuracy']:.4f} | "
+                f"{r['fine_f1']:.4f} | {r['hierarchical_consistency']:.4f} |\n"
+            )
+
+    print(f"✓ Output saved to {out_dir}")
 
 
 if __name__ == "__main__":
