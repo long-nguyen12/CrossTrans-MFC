@@ -226,7 +226,10 @@ def main():
         print(f"{'═' * 70}")
 
         checkpoint_path = (
-            Path(args.checkpoint_dir) / f"ablation_multiclass_{key}" / "best.pt"
+            Path(args.checkpoint_dir)
+            / f"ablation_multiclass_{key}"
+            / f"{key}_baseline"
+            / "best.pt"
         )
         if not checkpoint_path.exists():
             print(f"  [ERROR] Checkpoint not found at {checkpoint_path}")
