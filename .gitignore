@@ -58,3 +58,5 @@ utils/statistics.py
 *.mp4
 
 *.csv
+
+.claude/
