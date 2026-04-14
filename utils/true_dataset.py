@@ -105,8 +105,8 @@ def resolve_keyframe_path(claim_id: str, data_path: str = DATA_PATH) -> list:
 
     root = Path(data_path)
     candidates = [
-        root / "katnaaaaa" / "train_val_output" / claim_id,
-        root / "katnaaaaa" / "test_output" / claim_id,
+        root / "katna" / "train_val_output" / claim_id,
+        root / "katna" / "test_output" / claim_id,
     ]
     print(f"Resolving keyframe path for claim ID {claim_id} with data path {candidates}" )
     frames = []
