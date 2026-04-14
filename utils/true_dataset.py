@@ -108,6 +108,7 @@ def resolve_keyframe_path(claim_id: str, data_path: str = DATA_PATH) -> list:
         root / "katnaaaaa" / "train_val_output" / claim_id,
         root / "katnaaaaa" / "test_output" / claim_id,
     ]
+    print(f"Resolving keyframe path for claim ID {claim_id} with data path {candidates}" )
     frames = []
     for path in candidates:
         if path.exists():
@@ -117,6 +118,7 @@ def resolve_keyframe_path(claim_id: str, data_path: str = DATA_PATH) -> list:
                 for kf in keyframe_files:
                     frames.append(kf)
                 return frames
+    print(f"⚠️ Warning: No keyframes found for claim ID {claim_id} in expected locations.")
     return frames
 
 
