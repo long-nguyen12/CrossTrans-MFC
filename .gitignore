@@ -60,3 +60,6 @@ utils/statistics.py
 *.csv
 
 .claude/
+misc/*
+train_multiclass_*.py
+test_multiclass_*.py

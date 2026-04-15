@@ -413,7 +413,8 @@ def katna_process_folder(args):
                     width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
                     height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
                     cap.release()
-                    if width * height > 3840 * 2160:
+                    max_dim = max(width, height)
+                    if max_dim >= 3840:
                         logging.warning(f"Skipping video {video_id} due to large resolution: {width}x{height}")
                         resolution_too_large = True
 
