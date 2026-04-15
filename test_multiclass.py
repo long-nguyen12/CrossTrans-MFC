@@ -12,6 +12,7 @@ Usage:
 """
 
 import argparse
+import csv
 import json
 from dataclasses import fields
 from pathlib import Path
@@ -76,6 +77,7 @@ def evaluate(model, loader, device, desc="Testing"):
 
     all_coarse_true, all_coarse_pred = [], []
     all_flat_fine_true, all_flat_fine_pred = [], []
+    detailed_results = []
 
     for batch in tqdm(loader, desc=desc):
         coarse_labels = normalize_labels(batch["label"]).to(device)
@@ -91,15 +93,44 @@ def evaluate(model, loader, device, desc="Testing"):
             )
 
         coarse_preds = out["coarse_logits"].argmax(dim=-1)
+        coarse_probs = torch.softmax(out["coarse_logits"], dim=-1)
 
         # Flat fine predictions
         flat_fine_preds = []
         for i in range(coarse_labels.size(0)):
             c = coarse_preds[i].item()
             n_fine_c = NUM_FINE_PER_COARSE[c]
-            fine_pred_i = out["fine_logits"][i, :n_fine_c].argmax().item()
+            fine_logits_i = out["fine_logits"][i, :n_fine_c]
+            fine_probs_i = torch.softmax(fine_logits_i, dim=-1)
+            fine_pred_i = fine_logits_i.argmax().item()
             offset = sum(NUM_FINE_PER_COARSE[:c])
             flat_fine_preds.append(offset + fine_pred_i)
+
+            coarse_true_i = coarse_labels[i].item()
+            coarse_pred_i = c
+            flat_fine_true_i = flat_fine_labels[i].item()
+            flat_fine_pred_i = offset + fine_pred_i
+            detailed_results.append(
+                {
+                    "index": len(detailed_results),
+                    "claim_id": batch["claim_id"][i],
+                    "claim": batch["claim"][i],
+                    "rating": batch["rating"][i],
+                    "url": batch["url"][i],
+                    "coarse_true": coarse_true_i,
+                    "coarse_true_name": COARSE_LABELS[coarse_true_i],
+                    "coarse_pred": coarse_pred_i,
+                    "coarse_pred_name": COARSE_LABELS[coarse_pred_i],
+                    "coarse_confidence": float(coarse_probs[i, coarse_pred_i].item()),
+                    "coarse_correct": coarse_true_i == coarse_pred_i,
+                    "fine_true": flat_fine_true_i,
+                    "fine_true_name": FINE_LABELS[flat_fine_true_i],
+                    "fine_pred": flat_fine_pred_i,
+                    "fine_pred_name": FINE_LABELS[flat_fine_pred_i],
+                    "fine_confidence": float(fine_probs_i[fine_pred_i].item()),
+                    "fine_correct": flat_fine_true_i == flat_fine_pred_i,
+                }
+            )
 
         all_coarse_true.extend(coarse_labels.cpu().tolist())
         all_coarse_pred.extend(coarse_preds.cpu().tolist())
@@ -136,6 +167,7 @@ def evaluate(model, loader, device, desc="Testing"):
         "coarse_pred": all_coarse_pred,
         "flat_fine_true": all_flat_fine_true,
         "flat_fine_pred": all_flat_fine_pred,
+        "detailed_results": detailed_results,
     }
 
 
@@ -265,6 +297,40 @@ def main():
         f.write(fine_report + "\n")
     print(f"\nSaved evaluation log to: {log_path}")
 
+    # Save per-record detailed results
+    detail_json_path = checkpoint_path.parent / f"evaluation_{args.split}_{checkpoint_path.stem}_multiclass_details.json"
+    with open(detail_json_path, "w", encoding="utf-8") as f:
+        json.dump(metrics["detailed_results"], f, indent=2, ensure_ascii=False)
+    print(f"Saved detailed per-record results to: {detail_json_path}")
+
+    detail_csv_path = checkpoint_path.parent / f"evaluation_{args.split}_{checkpoint_path.stem}_multiclass_details.csv"
+    with open(detail_csv_path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=[
+                "index",
+                "claim_id",
+                "claim",
+                "rating",
+                "url",
+                "coarse_true",
+                "coarse_true_name",
+                "coarse_pred",
+                "coarse_pred_name",
+                "coarse_confidence",
+                "coarse_correct",
+                "fine_true",
+                "fine_true_name",
+                "fine_pred",
+                "fine_pred_name",
+                "fine_confidence",
+                "fine_correct",
+            ],
+        )
+        writer.writeheader()
+        writer.writerows(metrics["detailed_results"])
+    print(f"Saved detailed per-record CSV to: {detail_csv_path}")
+
     # Save JSON output
     if args.output:
         out_path = Path(args.output)
@@ -286,6 +352,7 @@ def main():
             "coarse_true_labels": metrics["coarse_true"],
             "fine_predictions": metrics["flat_fine_pred"],
             "fine_true_labels": metrics["flat_fine_true"],
+            "detailed_results": metrics["detailed_results"],
         }
         with open(out_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
