@@ -83,7 +83,7 @@ def _select_representative_frame_spectral(
     frames,
     embeddings,
     n_clusters,
-    plot_clusters=True,
+    plot_clusters=False,
     plot_path=None,
     plot_title=None,
 ):
@@ -192,7 +192,7 @@ def clip_chunk_keyframes_extraction(
     chunk_count = min(chunk_count, total_frames)
     chunk_size = total_frames / chunk_count
 
-    # print(f"Using device: {device}")
+    print(f"Using device: {device}")
 
     target_path.mkdir(parents=True, exist_ok=True)
     saved = 0
@@ -250,8 +250,8 @@ def process_folder_videos(args):
     with open(test_annotation, "r") as f:
         video_ids = [line.strip() for line in f if line.strip()]
 
-    # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    device = "cpu"
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # device = "cpu"
     model_name = VIDEO_DESCRIPTOR_CONFIG.get(
         "clip_model_name", "openai/clip-vit-base-patch32"
     )
@@ -263,8 +263,6 @@ def process_folder_videos(args):
         for i, video_id in tqdm(
             enumerate(video_ids), total=len(video_ids), desc="Processing videos"
         ):
-            if i == 10:
-                break
             try:
                 video_file = None
                 for ext in [".mp4", ".mkv"]:
@@ -351,22 +349,23 @@ def katna_keyframes_extraction(
         >= no_of_frames_to_returned
     ):
         logging.info(f"Keyframes already extracted and present in {target_path}")
-        return target_path
+        return target_path, 0
 
     disk_writer = KeyFrameDiskWriter(location=target_path)
 
     logging.info(f"Input video file path = {video_file_path}")
-
+    start = time.time()
     vd.extract_video_keyframes(
         no_of_frames=no_of_frames_to_returned,
         file_path=video_file_path,
         writer=disk_writer,
     )
+    end = time.time() - start
     logging.info(f"video {video_base_name}：Keyframes extracted successfully")
 
     reorder_and_rename_images(target_path)
 
-    return target_path
+    return target_path, end
 
 
 def katna_process_folder(args):
@@ -390,8 +389,6 @@ def katna_process_folder(args):
         for i, video_id in tqdm(
             enumerate(video_ids), total=len(video_ids), desc="Processing videos"
         ):
-            if i == 10:
-                break
             try:
                 logging.info(f"Processing video {i + 1}/{len(video_ids)}: {video_id}")
                 video_file = None
@@ -410,18 +407,31 @@ def katna_process_folder(args):
                 if not os.path.exists(data_folder):
                     os.makedirs(data_folder)
 
+                cap = cv2.VideoCapture(video_file)
+                resolution_too_large = False
+                if cap.isOpened():
+                    width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+                    height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+                    cap.release()
+                    if width * height > 3840 * 2160:
+                        logging.warning(f"Skipping video {video_id} due to large resolution: {width}x{height}")
+                        resolution_too_large = True
+
+                if resolution_too_large:
+                    continue
+
                 logging.info(f"Extracting keyframes for video: {video_id}")
                 try:
                     chunk_count = VIDEO_DESCRIPTOR_CONFIG.get("chunk_count", 10)
-                    start_time = time.time()
-                    _ = katna_keyframes_extraction(
+
+                    target_path, time_taken = katna_keyframes_extraction(
                         video_file,
                         no_of_frames_to_returned=chunk_count,
                         output_dir=test_output_dir,
                     )
-                    end_time = time.time() - start_time
+
                     video_length = _get_video_length(video_file)
-                    writer.writerow([video_id, end_time, video_length])
+                    writer.writerow([video_id, time_taken, video_length])
                     logging.info(
                         f"Keyframes extracted successfully for video: {video_id}"
                     )
@@ -481,7 +491,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--split",
         type=str,
-        default="test",
+        default="train_val",
         choices=["train_val", "test"],
         help="Dataset split to evaluate",
     )
@@ -491,6 +501,21 @@ if __name__ == "__main__":
         default="data/video_cache",
         help="Dir with pre-extracted video feature .pt files",
     )
+    parser.add_argument(
+        "--method",
+        type=str,
+        default="katna",
+        choices=["katna", "clip"],
+        help="Method to extract keyframes",
+    )
+    parser.add_argument(
+        "--limit",
+        type=any,
+        default=None,
+        help="Number of videos to extract",
+    )
     args = parser.parse_args()
-    process_folder_videos(args)
-    # katna_process_folder(args)
+    if args.method == "katna":
+        katna_process_folder(args)
+    elif args.method == "clip":
+        process_folder_videos(args)

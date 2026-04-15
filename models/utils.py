@@ -11,7 +11,7 @@ import torch.nn.functional as F
 from PIL import Image
 
 from transformers import AutoTokenizer, AutoModel, AutoProcessor
-from transformers import LongformerTokenizer, LongformerModel
+from transformers import LongformerTokenizer, LongformerModel, LongformerTokenizerFast
 
 from transformers import logging
 import math
@@ -138,10 +138,7 @@ def text_model(model_type="roberta-base", device="auto"):
         raise ValueError(f"Invalid model_id: {model_id}")
 
     if device == "auto":
-        if torch.cuda.is_available():
-            device = "cuda"
-        else:
-            device = "cpu"
+        device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Loading {model_id} on {device}...")
 
     try:
@@ -167,10 +164,48 @@ def text_model(model_type="roberta-base", device="auto"):
         raise RuntimeError(error_msg) from e
 
 
-def text_model_long(pt="longformer"):
-    if pt == "longformer":
-        processor = LongformerTokenizer.from_pretrained("allenai/longformer-base-4096")
-        model = LongformerModel.from_pretrained("allenai/longformer-base-4096")
-    else:
-        raise ValueError(f"Unknown long text model: {pt}")
-    return processor, model
+def text_model_long(pt: str = "longformer", device: str = "auto"):
+    MODEL_REGISTRY = {
+        "longformer": {
+            "model": "allenai/longformer-base-4096",
+            "model_class": LongformerModel,
+            "tokenizer_class": LongformerTokenizerFast,
+            "trust_remote_code": False,
+        },
+        "longformer-large": {
+            "model": "allenai/longformer-large-4096",
+            "model_class": LongformerModel,
+            "tokenizer_class": LongformerTokenizerFast,
+            "trust_remote_code": False,
+        },
+        "bge-m3": {
+            "model": "BAAI/bge-m3",
+            "model_class": AutoModel,
+            "tokenizer_class": AutoTokenizer,
+            "trust_remote_code": True,
+        },
+    }
+
+    if pt not in MODEL_REGISTRY:
+        raise ValueError(
+            f"Unknown model: {pt}. Available: {list(MODEL_REGISTRY.keys())}"
+        )
+
+    if device == "auto":
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    config = MODEL_REGISTRY[pt]
+    print(f"Loading {pt} model ({config['model']}) on {device}...")
+
+    tokenizer = config["tokenizer_class"].from_pretrained(
+        config["model"], trust_remote_code=config["trust_remote_code"]
+    )
+    model = config["model_class"].from_pretrained(
+        config["model"], trust_remote_code=config["trust_remote_code"]
+    )
+
+    model.eval()
+
+    model = model.to(device)
+
+    return tokenizer, model

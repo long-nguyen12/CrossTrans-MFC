@@ -28,7 +28,7 @@ def main():
 
     # Model config
     from models.model import (
-        MMFactCheckingClassifier,
+        CrossTransVFC,
         MMConfig,
     )
 
@@ -69,7 +69,7 @@ def main():
     id2label = {v: k for k, v in label2id.items()}
 
     # Create model
-    model = MMFactCheckingClassifier(cfg)
+    model = CrossTransVFC(cfg)
     model = model.to(device)
 
     # Count parameters
@@ -84,7 +84,7 @@ def main():
     print(checkpoint["cfg"])
     model.load_state_dict(checkpoint["state_dict"], strict=True)
 
-    return 
+    return
     # Test
     y_true, y_pred = [], []
     model.eval()

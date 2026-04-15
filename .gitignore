@@ -53,4 +53,10 @@ models/model copy.py
 models/model_best.py
 
 utils/statistics.py
-Katna/
+.gitnexus
+
+*.mp4
+
+*.csv
+
+.claude/

@@ -258,7 +258,11 @@ def main(args):
 
     save_dir = Path("checkpoints")
     save_dir.mkdir(parents=True, exist_ok=True)
-    dir_name = f"{args.saved_prefix}_{time.strftime('%Y%m%d_%H%M%S')}"
+    if not args.saved_prefix:
+        timestamp = time.strftime("%Y%m%d-%H%M%S")
+        dir_name = f"run_{timestamp}"
+    else:
+        dir_name = f"{args.saved_prefix}"
     run_dir = save_dir / dir_name
     run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -364,7 +368,7 @@ def main(args):
     print(f"{'=' * 70}")
 
     best_checkpoint = run_dir / "best.pt"
-    checkpoint = torch.load(best_checkpoint, map_location=device, weights_only=True)
+    checkpoint = torch.load(best_checkpoint, map_location=device, weights_only=False)
     model.load_state_dict(checkpoint["state_dict"])
     print(f"Loaded best model from epoch {checkpoint['epoch']}")
     print(

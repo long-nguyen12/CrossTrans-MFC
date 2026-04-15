@@ -108,6 +108,7 @@ def resolve_keyframe_path(claim_id: str, data_path: str = DATA_PATH) -> list:
         root / "train_val_output" / claim_id,
         root / "test_output" / claim_id,
     ]
+    print(f"Resolving keyframe path for claim ID {claim_id} with data path {candidates}" )
     frames = []
     for path in candidates:
         if path.exists():
@@ -117,7 +118,34 @@ def resolve_keyframe_path(claim_id: str, data_path: str = DATA_PATH) -> list:
                 for kf in keyframe_files:
                     frames.append(kf)
                 return frames
+    print(f"⚠️ Warning: No keyframes found for claim ID {claim_id} in expected locations.")
     return frames
+
+
+# Fine-grained rating taxonomy
+# Maps each rating to (binary_label, fine_sub_label)
+RATING_TO_FINE = {
+    "true": (0, 0),
+    "mostly true": (0, 1),
+    "correct attribution": (0, 2),
+    "false": (1, 0),
+    "mostly false": (1, 1),
+    "mixture": (1, 2),
+    "fake": (1, 3),
+    "miscaptioned": (1, 4),
+}
+
+# Number of fine-grained sub-labels per coarse class
+NUM_FINE_PER_COARSE = (3, 5)  # 3 for TRUE, 5 for FALSE
+TOTAL_FINE_CLASSES = sum(NUM_FINE_PER_COARSE)  # 8
+
+# Flat fine-grained label: unique index across all classes
+# TRUE sub-labels: 0, 1, 2  |  FALSE sub-labels: 3, 4, 5, 6, 7
+RATING_TO_FLAT_FINE = {
+    rating: coarse * NUM_FINE_PER_COARSE[0] + fine if coarse == 0
+    else NUM_FINE_PER_COARSE[0] + fine
+    for rating, (coarse, fine) in RATING_TO_FINE.items()
+}
 
 
 def rating_to_label(rating_str):
@@ -131,12 +159,24 @@ def rating_to_label(rating_str):
         print(rating_lower)
 
 
+def rating_to_multilabel(rating_str):
+    """Return (binary_label, fine_sub_label, flat_fine_label) for a rating string."""
+    rating_lower = rating_str.lower()
+    if rating_lower not in RATING_TO_FINE:
+        print(f"Unknown rating: {rating_lower}")
+        return 0, 0, 0
+    binary, fine_sub = RATING_TO_FINE[rating_lower]
+    flat_fine = RATING_TO_FLAT_FINE[rating_lower]
+    return binary, fine_sub, flat_fine
+
+
 def encode_one_sample(sample):
     """Encode a single sample from the dataset."""
     # Extract fields from JSON structure
     claim = clean_data(sample.get("claim", ""))
     rating_str = sample.get("rating")
     label_idx = rating_to_label(rating_str)
+    binary_idx, fine_sub_idx, flat_fine_idx = rating_to_multilabel(rating_str)
     evidences_dict = sample.get("evidences", {})
     text_evidence = extract_evidence_text(evidences_dict)
 
@@ -155,6 +195,8 @@ def encode_one_sample(sample):
         "claim_id": claim_id,
         "claim": claim,
         "label": torch.tensor(one_hot(label_idx, 2), dtype=torch.float),
+        "fine_label": fine_sub_idx,
+        "flat_fine_label": flat_fine_idx,
         "rating": rating_str,
         "text_evidence": text_evidence,
         "video_transcript": video_transcript,
@@ -198,6 +240,10 @@ def collate_claim_verification(batch):
     claim_ids = [item["claim_id"] for item in batch]
     claims = [item["claim"] for item in batch]
     labels = torch.stack([item["label"] for item in batch])
+    fine_labels = torch.tensor([item["fine_label"] for item in batch], dtype=torch.long)
+    flat_fine_labels = torch.tensor(
+        [item["flat_fine_label"] for item in batch], dtype=torch.long
+    )
     contents = [item["content"] for item in batch]
     ratings = [item["rating"] for item in batch]
     text_evidences = [item["text_evidence"] for item in batch]
@@ -213,6 +259,8 @@ def collate_claim_verification(batch):
         "claim_id": claim_ids,
         "claim": claims,
         "label": labels,
+        "fine_label": fine_labels,
+        "flat_fine_label": flat_fine_labels,
         "content": contents,
         "rating": ratings,
         "text_evidence": text_evidences,
