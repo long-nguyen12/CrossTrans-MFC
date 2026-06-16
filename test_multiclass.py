@@ -17,6 +17,8 @@ import json
 from dataclasses import fields
 from pathlib import Path
 
+import numpy as np
+
 import torch
 import torch.nn as nn
 from sklearn.metrics import (
@@ -187,6 +189,18 @@ def main():
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--output", type=str, default="")
+    parser.add_argument(
+        "--n-bootstrap",
+        type=int,
+        default=1000,
+        help="Number of bootstrap iterations for std estimation",
+    )
+    parser.add_argument(
+        "--bootstrap-seed",
+        type=int,
+        default=42,
+        help="Random seed for bootstrap reproducibility",
+    )
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -295,6 +309,55 @@ def main():
         f.write(f"F1 (macro): {metrics['fine_f1']:.4f}\n")
         f.write(f"Hierarchical Consistency: {metrics['consistency']:.4f}\n")
         f.write(fine_report + "\n")
+
+    # ── Bootstrap standard deviation ──
+    n_boot = args.n_bootstrap
+    rng = np.random.RandomState(args.bootstrap_seed)
+    n_samples = len(metrics["coarse_true"])
+
+    coarse_true_arr = np.array(metrics["coarse_true"])
+    coarse_pred_arr = np.array(metrics["coarse_pred"])
+    fine_true_arr = np.array(metrics["flat_fine_true"])
+    fine_pred_arr = np.array(metrics["flat_fine_pred"])
+
+    boot_coarse = {"accuracy": [], "precision_macro": [], "recall_macro": [], "f1_macro": []}
+    boot_fine = {"accuracy": [], "precision_macro": [], "recall_macro": [], "f1_macro": []}
+
+    for _ in range(n_boot):
+        idx = rng.randint(0, n_samples, size=n_samples)
+        ct, cp = coarse_true_arr[idx], coarse_pred_arr[idx]
+        ft, fp = fine_true_arr[idx], fine_pred_arr[idx]
+
+        boot_coarse["accuracy"].append(accuracy_score(ct, cp))
+        boot_coarse["precision_macro"].append(precision_score(ct, cp, average="macro", zero_division=0))
+        boot_coarse["recall_macro"].append(recall_score(ct, cp, average="macro", zero_division=0))
+        boot_coarse["f1_macro"].append(f1_score(ct, cp, average="macro", zero_division=0))
+
+        boot_fine["accuracy"].append(accuracy_score(ft, fp))
+        boot_fine["precision_macro"].append(precision_score(ft, fp, average="macro", zero_division=0))
+        boot_fine["recall_macro"].append(recall_score(ft, fp, average="macro", zero_division=0))
+        boot_fine["f1_macro"].append(f1_score(ft, fp, average="macro", zero_division=0))
+
+    boot_coarse_stats = {k: (np.mean(v), np.std(v)) for k, v in boot_coarse.items()}
+    boot_fine_stats = {k: (np.mean(v), np.std(v)) for k, v in boot_fine.items()}
+
+    print(f"\nBootstrap Results ({n_boot} iterations):")
+    print("  COARSE:")
+    for metric, (mean, std) in boot_coarse_stats.items():
+        print(f"    {metric}: {mean:.4f} ± {std:.4f}")
+    print("  FINE-GRAINED:")
+    for metric, (mean, std) in boot_fine_stats.items():
+        print(f"    {metric}: {mean:.4f} ± {std:.4f}")
+
+    with open(log_path, "a", encoding="utf-8") as f:
+        f.write(f"\nBootstrap Results ({n_boot} iterations):\n")
+        f.write("COARSE:\n")
+        for metric, (mean, std) in boot_coarse_stats.items():
+            f.write(f"  {metric}: {mean:.4f} ± {std:.4f}\n")
+        f.write("FINE-GRAINED:\n")
+        for metric, (mean, std) in boot_fine_stats.items():
+            f.write(f"  {metric}: {mean:.4f} ± {std:.4f}\n")
+
     print(f"\nSaved evaluation log to: {log_path}")
 
     # Save per-record detailed results
@@ -353,6 +416,18 @@ def main():
             "fine_predictions": metrics["flat_fine_pred"],
             "fine_true_labels": metrics["flat_fine_true"],
             "detailed_results": metrics["detailed_results"],
+            "bootstrap": {
+                "n_iterations": n_boot,
+                "seed": args.bootstrap_seed,
+                "coarse": {
+                    metric: {"mean": float(mean), "std": float(std)}
+                    for metric, (mean, std) in boot_coarse_stats.items()
+                },
+                "fine": {
+                    metric: {"mean": float(mean), "std": float(std)}
+                    for metric, (mean, std) in boot_fine_stats.items()
+                },
+            },
         }
         with open(out_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
