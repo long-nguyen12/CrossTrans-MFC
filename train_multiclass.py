@@ -92,7 +92,6 @@ def build_hierarchical_loss(
     def hierarchical_loss(coarse_logits, fine_logits, coarse_labels, fine_labels):
         loss_coarse = coarse_ce(coarse_logits, coarse_labels)
 
-        # For fine loss, compute per-group CE
         loss_fine = torch.tensor(0.0, device=device)
         n_fine_samples = 0
 
@@ -101,8 +100,6 @@ def build_hierarchical_loss(
             if not mask_c.any():
                 continue
             n_fine_c = NUM_FINE_PER_COARSE[c]
-            # fine_logits[mask_c] has shape (N_c, max_fine)
-            # Only use first n_fine_c columns
             logits_c = fine_logits[mask_c, :n_fine_c]
             targets_c = fine_labels[mask_c]
             loss_fine = loss_fine + fine_ce_funcs[c](logits_c, targets_c) * mask_c.sum()
@@ -287,12 +284,14 @@ def train_one_epoch(
     return total_loss / max(n, 1)
 
 
-def main(args):
+def main(args, seed=42):
     DATA_ROOT = Path("./data/TRUE_Dataset")
+    print(f"\n{'#' * 70}")
+    print(f"# RUN WITH SEED = {seed}")
+    print(f"{'#' * 70}")
     print(f"Using dataset module: {true_dataset_module.__file__}")
 
     # ====== Hyperparams ======
-    seed = 42
     batch_size = args.batch_size
     epochs = args.epochs
     lr = args.lr
@@ -433,9 +432,9 @@ def main(args):
     save_dir.mkdir(parents=True, exist_ok=True)
     if not args.saved_prefix:
         timestamp = time.strftime("%Y%m%d-%H%M%S")
-        dir_name = f"multiclass_{timestamp}"
+        dir_name = f"multiclass_{timestamp}_seed{seed}"
     else:
-        dir_name = f"{args.saved_prefix}"
+        dir_name = f"{args.saved_prefix}_seed{seed}"
     run_dir = save_dir / dir_name
     run_dir.mkdir(parents=True, exist_ok=True)
     print(f"\nCheckpoints will be saved to: {run_dir}")
@@ -631,6 +630,8 @@ def main(args):
     print(f"\n✓ Test results saved to {run_dir / 'test_results.json'}")
     print(f"✓ Training completed! All outputs saved to {run_dir}")
 
+    return test_results
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
@@ -666,5 +667,46 @@ if __name__ == "__main__":
     parser.add_argument("--image_model", type=str, default="clip")
     parser.add_argument("--video_model", type=str, default="videomae")
     parser.add_argument("--saved-prefix", type=str, default="hierarchical_multiclass")
+    parser.add_argument(
+        "--num_runs", type=int, default=5, help="Number of runs with different seeds"
+    )
     args = parser.parse_args()
-    main(args)
+
+    SEEDS = [42, 128, 256, 512, 1024]
+    num_runs = args.num_runs
+    seeds = SEEDS[:num_runs]
+
+    all_results = []
+    for run_seed in seeds:
+        result = main(args, seed=run_seed)
+        all_results.append(result)
+
+    # ====== Aggregated Results ======
+    metric_keys = [
+        "test_loss",
+        "coarse_accuracy",
+        "coarse_f1_macro",
+        "fine_accuracy",
+        "fine_f1_macro",
+        "hierarchical_consistency",
+    ]
+
+    print(f"\n{'=' * 70}")
+    print(f"Aggregated Results over {num_runs} runs")
+    print(f"Seeds: {seeds}")
+    print(f"{'=' * 70}")
+
+    summary = {}
+    for key in metric_keys:
+        values = [r[key] for r in all_results]
+        mean = np.mean(values)
+        std = np.std(values)
+        summary[key] = {"mean": float(mean), "std": float(std), "values": values}
+        print(f"  {key}: {mean:.4f} ± {std:.4f}")
+
+    # Save aggregated results
+    save_dir = Path("checkpoints")
+    agg_path = save_dir / f"{args.saved_prefix or 'multiclass'}_aggregated.json"
+    with open(agg_path, "w") as f:
+        json.dump({"seeds": seeds, "summary": summary}, f, indent=2)
+    print(f"\n✓ Aggregated results saved to {agg_path}")
