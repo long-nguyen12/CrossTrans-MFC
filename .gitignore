@@ -61,5 +61,3 @@ utils/statistics.py
 
 .claude/
 misc/*
-train_multiclass_*.py
-test_multiclass_*.py
