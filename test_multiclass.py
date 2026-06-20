@@ -173,38 +173,7 @@ def evaluate(model, loader, device, desc="Testing"):
     }
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Evaluate hierarchical multi-class checkpoint."
-    )
-    parser.add_argument(
-        "--checkpoint", type=str, required=True,
-        help="Path to .pt checkpoint",
-    )
-    parser.add_argument("--data-root", type=str, default="./data/TRUE_Dataset")
-    parser.add_argument(
-        "--split", type=str, default="test",
-        choices=["train", "val", "test"],
-    )
-    parser.add_argument("--batch-size", type=int, default=1)
-    parser.add_argument("--num-workers", type=int, default=4)
-    parser.add_argument("--output", type=str, default="")
-    parser.add_argument(
-        "--n-bootstrap",
-        type=int,
-        default=1000,
-        help="Number of bootstrap iterations for std estimation",
-    )
-    parser.add_argument(
-        "--bootstrap-seed",
-        type=int,
-        default=42,
-        help="Random seed for bootstrap reproducibility",
-    )
-    args = parser.parse_args()
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    checkpoint_path = Path(args.checkpoint)
+def evaluate_single_checkpoint(args, checkpoint_path, loader, device):
     checkpoint = load_checkpoint(checkpoint_path, device)
 
     cfg = build_cfg_from_checkpoint(checkpoint)
@@ -222,21 +191,7 @@ def main():
     print(f"Trainable parameters: {trainable_params:,}")
     print(f"Model size (FP32 dtype): {model_size_mb:.2f} MB")
 
-    # Load data
-    train_loader, val_loader, test_loader = create_dataloaders(
-        path=args.data_root,
-        batch_size=args.batch_size,
-        shuffle_train=False,
-        num_workers=args.num_workers,
-        pin_memory=True if device.type == "cuda" else False,
-    )
-    loader_map = {"train": train_loader, "val": val_loader, "test": test_loader}
-    loader = loader_map[args.split]
-
-    print(f"Using device: {device}")
     print(f"Loaded checkpoint: {checkpoint_path}")
-    print(f"Evaluating split: {args.split}")
-    print(f"Samples: {len(loader.dataset)}")
 
     # Evaluate
     metrics = evaluate(model, loader, device, desc=f"Evaluating {args.split}")
@@ -310,53 +265,7 @@ def main():
         f.write(f"Hierarchical Consistency: {metrics['consistency']:.4f}\n")
         f.write(fine_report + "\n")
 
-    # ── Bootstrap standard deviation ──
-    n_boot = args.n_bootstrap
-    rng = np.random.RandomState(args.bootstrap_seed)
-    n_samples = len(metrics["coarse_true"])
 
-    coarse_true_arr = np.array(metrics["coarse_true"])
-    coarse_pred_arr = np.array(metrics["coarse_pred"])
-    fine_true_arr = np.array(metrics["flat_fine_true"])
-    fine_pred_arr = np.array(metrics["flat_fine_pred"])
-
-    boot_coarse = {"accuracy": [], "precision_macro": [], "recall_macro": [], "f1_macro": []}
-    boot_fine = {"accuracy": [], "precision_macro": [], "recall_macro": [], "f1_macro": []}
-
-    for _ in range(n_boot):
-        idx = rng.randint(0, n_samples, size=n_samples)
-        ct, cp = coarse_true_arr[idx], coarse_pred_arr[idx]
-        ft, fp = fine_true_arr[idx], fine_pred_arr[idx]
-
-        boot_coarse["accuracy"].append(accuracy_score(ct, cp))
-        boot_coarse["precision_macro"].append(precision_score(ct, cp, average="macro", zero_division=0))
-        boot_coarse["recall_macro"].append(recall_score(ct, cp, average="macro", zero_division=0))
-        boot_coarse["f1_macro"].append(f1_score(ct, cp, average="macro", zero_division=0))
-
-        boot_fine["accuracy"].append(accuracy_score(ft, fp))
-        boot_fine["precision_macro"].append(precision_score(ft, fp, average="macro", zero_division=0))
-        boot_fine["recall_macro"].append(recall_score(ft, fp, average="macro", zero_division=0))
-        boot_fine["f1_macro"].append(f1_score(ft, fp, average="macro", zero_division=0))
-
-    boot_coarse_stats = {k: (np.mean(v), np.std(v)) for k, v in boot_coarse.items()}
-    boot_fine_stats = {k: (np.mean(v), np.std(v)) for k, v in boot_fine.items()}
-
-    print(f"\nBootstrap Results ({n_boot} iterations):")
-    print("  COARSE:")
-    for metric, (mean, std) in boot_coarse_stats.items():
-        print(f"    {metric}: {mean:.4f} ± {std:.4f}")
-    print("  FINE-GRAINED:")
-    for metric, (mean, std) in boot_fine_stats.items():
-        print(f"    {metric}: {mean:.4f} ± {std:.4f}")
-
-    with open(log_path, "a", encoding="utf-8") as f:
-        f.write(f"\nBootstrap Results ({n_boot} iterations):\n")
-        f.write("COARSE:\n")
-        for metric, (mean, std) in boot_coarse_stats.items():
-            f.write(f"  {metric}: {mean:.4f} ± {std:.4f}\n")
-        f.write("FINE-GRAINED:\n")
-        for metric, (mean, std) in boot_fine_stats.items():
-            f.write(f"  {metric}: {mean:.4f} ± {std:.4f}\n")
 
     print(f"\nSaved evaluation log to: {log_path}")
 
@@ -395,44 +304,138 @@ def main():
     print(f"Saved detailed per-record CSV to: {detail_csv_path}")
 
     # Save JSON output
-    if args.output:
-        out_path = Path(args.output)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "checkpoint": str(checkpoint_path),
-            "split": args.split,
-            "coarse_accuracy": float(metrics["coarse_acc"]),
-            "coarse_precision": float(metrics["coarse_precision"]),
-            "coarse_recall": float(metrics["coarse_recall"]),
-            "coarse_f1": float(metrics["coarse_f1"]),
-            "fine_accuracy": float(metrics["fine_acc"]),
-            "fine_precision": float(metrics["fine_precision"]),
-            "fine_recall": float(metrics["fine_recall"]),
-            "fine_f1": float(metrics["fine_f1"]),
-            "hierarchical_consistency": float(metrics["consistency"]),
-            "n_samples": len(loader.dataset),
-            "coarse_predictions": metrics["coarse_pred"],
-            "coarse_true_labels": metrics["coarse_true"],
-            "fine_predictions": metrics["flat_fine_pred"],
-            "fine_true_labels": metrics["flat_fine_true"],
-            "detailed_results": metrics["detailed_results"],
-            "bootstrap": {
-                "n_iterations": n_boot,
-                "seed": args.bootstrap_seed,
-                "coarse": {
-                    metric: {"mean": float(mean), "std": float(std)}
-                    for metric, (mean, std) in boot_coarse_stats.items()
-                },
-                "fine": {
-                    metric: {"mean": float(mean), "std": float(std)}
-                    for metric, (mean, std) in boot_fine_stats.items()
-                },
-            },
-        }
-        with open(out_path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
-        print(f"Saved output to: {out_path}")
+    out_path = Path(args.output) if args.output else checkpoint_path.parent / f"evaluation_{args.split}_{checkpoint_path.stem}_multiclass.json"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "checkpoint": str(checkpoint_path),
+        "split": args.split,
+        "coarse_accuracy": float(metrics["coarse_acc"]),
+        "coarse_precision": float(metrics["coarse_precision"]),
+        "coarse_recall": float(metrics["coarse_recall"]),
+        "coarse_f1": float(metrics["coarse_f1"]),
+        "fine_accuracy": float(metrics["fine_acc"]),
+        "fine_precision": float(metrics["fine_precision"]),
+        "fine_recall": float(metrics["fine_recall"]),
+        "fine_f1": float(metrics["fine_f1"]),
+        "hierarchical_consistency": float(metrics["consistency"]),
+        "n_samples": len(metrics["coarse_true"]),
+        "coarse_predictions": metrics["coarse_pred"],
+        "coarse_true_labels": metrics["coarse_true"],
+        "fine_predictions": metrics["flat_fine_pred"],
+        "fine_true_labels": metrics["flat_fine_true"],
+        "detailed_results": metrics["detailed_results"],
+    }
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+    print(f"Saved output to: {out_path}")
 
+    return payload
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Evaluate hierarchical multi-class checkpoint(s)."
+    )
+    parser.add_argument(
+        "--checkpoint", type=str, default="",
+        help="Path to a single .pt checkpoint (if testing just one)",
+    )
+    parser.add_argument(
+        "--saved-prefix", type=str, default="hierarchical_multiclass",
+        help="Prefix of the saved checkpoint directories for multiple seed testing",
+    )
+    parser.add_argument(
+        "--checkpoints-dir", type=str, default="checkpoints",
+        help="Directory where checkpoints are saved",
+    )
+    parser.add_argument(
+        "--num_runs", type=int, default=5,
+        help="Number of runs with different seeds to aggregate",
+    )
+    parser.add_argument("--data-root", type=str, default="./data/TRUE_Dataset")
+    parser.add_argument(
+        "--split", type=str, default="test",
+        choices=["train", "val", "test"],
+    )
+    parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument("--output", type=str, default="")
+    args = parser.parse_args()
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Load data
+    train_loader, val_loader, test_loader = create_dataloaders(
+        path=args.data_root,
+        batch_size=args.batch_size,
+        shuffle_train=False,
+        num_workers=args.num_workers,
+        pin_memory=True if device.type == "cuda" else False,
+    )
+    loader_map = {"train": train_loader, "val": val_loader, "test": test_loader}
+    loader = loader_map[args.split]
+
+    print(f"Using device: {device}")
+    print(f"Evaluating split: {args.split}")
+    print(f"Samples: {len(loader.dataset)}")
+
+    if args.checkpoint:
+        # Single checkpoint mode
+        checkpoint_path = Path(args.checkpoint)
+        metrics = evaluate_single_checkpoint(args, checkpoint_path, loader, device)
+        print(f"\n✓ Single evaluation completed for {checkpoint_path}")
+    else:
+        # Multiple seeds mode
+        SEEDS = [42, 128, 256, 512, 1024]
+        seeds = SEEDS[:args.num_runs]
+
+        all_results = []
+        evaluated_seeds = []
+        for seed in seeds:
+            checkpoint_path = Path(args.checkpoints_dir) / f"{args.saved_prefix}_seed{seed}" / "best.pt"
+            if not checkpoint_path.exists():
+                print(f"WARNING: Checkpoint not found: {checkpoint_path}. Skipping.")
+                continue
+
+            print(f"\nEvaluating seed {seed}...")
+            metrics = evaluate_single_checkpoint(args, checkpoint_path, loader, device)
+            all_results.append(metrics)
+            evaluated_seeds.append(seed)
+
+        if not all_results:
+            print("No checkpoints evaluated. Exiting.")
+            return
+
+        # Aggregate results
+        metric_keys = [
+            "coarse_accuracy",
+            "coarse_precision",
+            "coarse_recall",
+            "coarse_f1",
+            "fine_accuracy",
+            "fine_precision",
+            "fine_recall",
+            "fine_f1",
+            "hierarchical_consistency",
+        ]
+
+        print(f"\n{'=' * 70}")
+        print(f"Aggregated Results over {len(all_results)} runs")
+        print(f"Seeds: {evaluated_seeds}")
+        print(f"{'=' * 70}")
+
+        summary = {}
+        for key in metric_keys:
+            values = [r[key] for r in all_results]
+            mean = np.mean(values)
+            std = np.std(values)
+            summary[key] = {"mean": float(mean), "std": float(std), "values": values}
+            print(f"  {key}: {mean:.4f} ± {std:.4f}")
+
+        # Save aggregated results
+        agg_path = Path(args.checkpoints_dir) / f"{args.saved_prefix}_{args.split}_aggregated_test.json"
+        with open(agg_path, "w", encoding="utf-8") as f:
+            json.dump({"seeds": evaluated_seeds, "summary": summary}, f, indent=2)
+        print(f"\n✓ Aggregated test results saved to {agg_path}")
 
 if __name__ == "__main__":
     main()
