@@ -108,7 +108,6 @@ def resolve_keyframe_path(claim_id: str, data_path: str = DATA_PATH) -> list:
         root / "train_val_output" / claim_id,
         root / "test_output" / claim_id,
     ]
-    print(f"Resolving keyframe path for claim ID {claim_id} with data path {candidates}" )
     frames = []
     for path in candidates:
         if path.exists():
@@ -118,7 +117,6 @@ def resolve_keyframe_path(claim_id: str, data_path: str = DATA_PATH) -> list:
                 for kf in keyframe_files:
                     frames.append(kf)
                 return frames
-    print(f"⚠️ Warning: No keyframes found for claim ID {claim_id} in expected locations.")
     return frames
 
 
@@ -142,8 +140,11 @@ TOTAL_FINE_CLASSES = sum(NUM_FINE_PER_COARSE)  # 8
 # Flat fine-grained label: unique index across all classes
 # TRUE sub-labels: 0, 1, 2  |  FALSE sub-labels: 3, 4, 5, 6, 7
 RATING_TO_FLAT_FINE = {
-    rating: coarse * NUM_FINE_PER_COARSE[0] + fine if coarse == 0
-    else NUM_FINE_PER_COARSE[0] + fine
+    rating: (
+        coarse * NUM_FINE_PER_COARSE[0] + fine
+        if coarse == 0
+        else NUM_FINE_PER_COARSE[0] + fine
+    )
     for rating, (coarse, fine) in RATING_TO_FINE.items()
 }
 
