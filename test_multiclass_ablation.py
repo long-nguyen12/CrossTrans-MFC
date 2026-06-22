@@ -20,6 +20,7 @@ import json
 from dataclasses import fields
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn as nn
 from sklearn.metrics import (
@@ -267,178 +268,120 @@ def main():
             print(f"  [ERROR] No subfolders found in {base_variant_dir}")
             continue
 
-        # Dynamically use the only subfolder present
-        checkpoint_path = subfolders[0] / "best.pt"
+        variant_metrics = []
+        total_params = 0
+        trainable_params = 0
 
-        if not checkpoint_path.exists():
-            print(f"  [ERROR] Checkpoint not found at {checkpoint_path}")
+        for subfolder in subfolders:
+            checkpoint_path = subfolder / "best.pt"
+
+            if not checkpoint_path.exists():
+                print(f"  [WARNING] Checkpoint not found at {checkpoint_path}")
+                continue
+
+            print(f"  Loading {checkpoint_path}...")
+            checkpoint = load_checkpoint(checkpoint_path, device)
+            cfg = build_cfg_from_checkpoint(checkpoint)
+            num_fine = tuple(
+                checkpoint.get("num_fine_per_coarse", list(NUM_FINE_PER_COARSE))
+            )
+
+            model = AblationModel(cfg, ablation_cfg, num_fine_per_coarse=num_fine).to(
+                device
+            )
+            model.load_state_dict(checkpoint["state_dict"], strict=True)
+
+            total_params = sum(p.numel() for p in model.parameters())
+            trainable_params = sum(
+                p.numel() for p in model.parameters() if p.requires_grad
+            )
+
+            metrics = evaluate(
+                model, loader, device, desc=f"Evaluating {key} ({subfolder.name})"
+            )
+            variant_metrics.append(metrics)
+
+            del model
+            torch.cuda.empty_cache()
+
+        if not variant_metrics:
+            print(f"  [ERROR] No valid checkpoints evaluated for variant {key}")
             continue
 
-        print(f"  Loading {checkpoint_path}...")
-        checkpoint = load_checkpoint(checkpoint_path, device)
-        cfg = build_cfg_from_checkpoint(checkpoint)
-        num_fine = tuple(
-            checkpoint.get("num_fine_per_coarse", list(NUM_FINE_PER_COARSE))
-        )
-
-        model = AblationModel(cfg, ablation_cfg, num_fine_per_coarse=num_fine).to(
-            device
-        )
-        model.load_state_dict(checkpoint["state_dict"], strict=True)
-
-        total_params = sum(p.numel() for p in model.parameters())
-        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-
-        metrics = evaluate(model, loader, device, desc=f"Evaluating {key}")
-
-        print(f"  --- Coarse Metrics ---")
-        print(f"  Accuracy:  {metrics['coarse_acc']:.4f}")
-        print(f"  Precision: {metrics['coarse_precision']:.4f}")
-        print(f"  Recall:    {metrics['coarse_recall']:.4f}")
-        print(f"  F1:        {metrics['coarse_f1']:.4f}")
-        print(f"  --- Fine Metrics ---")
-        print(f"  Accuracy:  {metrics['fine_acc']:.4f}")
-        print(f"  Precision: {metrics['fine_precision']:.4f}")
-        print(f"  Recall:    {metrics['fine_recall']:.4f}")
-        print(f"  F1:        {metrics['fine_f1']:.4f}")
-
-        # Confusion matrix
-        print("\n  Fine-grained Confusion Matrix:")
-        cm = confusion_matrix(
-            metrics["flat_fine_true"],
-            metrics["flat_fine_pred"],
-            labels=list(range(TOTAL_FINE_CLASSES)),
-        )
-        fine_names = [FINE_LABELS[i] for i in range(TOTAL_FINE_CLASSES)]
-        header = "            " + " ".join(f"{n[:6]:>6}" for n in fine_names)
-        print(header)
-        for i, row in enumerate(cm):
-            row_str = " ".join(f"{v:6d}" for v in row)
-            print(f"  {fine_names[i]:<10}{row_str}")
+        # Aggregate metrics
+        agg_metrics = {}
+        for m_key in [
+            "coarse_acc",
+            "coarse_precision",
+            "coarse_recall",
+            "coarse_f1",
+            "fine_acc",
+            "fine_precision",
+            "fine_recall",
+            "fine_f1",
+            "consistency",
+        ]:
+            vals = [m[m_key] for m in variant_metrics]
+            agg_metrics[m_key] = np.mean(vals)
+            agg_metrics[f"{m_key}_std"] = np.std(vals)
 
         result_dict = {
             "variant": key,
             "description": ablation_cfg.description,
             "total_params": total_params,
             "trainable_params": trainable_params,
-            "coarse_accuracy": float(metrics["coarse_acc"]),
-            "coarse_precision": float(metrics["coarse_precision"]),
-            "coarse_recall": float(metrics["coarse_recall"]),
-            "coarse_f1": float(metrics["coarse_f1"]),
-            "fine_accuracy": float(metrics["fine_acc"]),
-            "fine_precision": float(metrics["fine_precision"]),
-            "fine_recall": float(metrics["fine_recall"]),
-            "fine_f1": float(metrics["fine_f1"]),
-            "hierarchical_consistency": float(metrics["consistency"]),
+            "coarse_accuracy": float(agg_metrics["coarse_acc"]),
+            "coarse_accuracy_std": float(agg_metrics["coarse_acc_std"]),
+            "coarse_precision": float(agg_metrics["coarse_precision"]),
+            "coarse_precision_std": float(agg_metrics["coarse_precision_std"]),
+            "coarse_recall": float(agg_metrics["coarse_recall"]),
+            "coarse_recall_std": float(agg_metrics["coarse_recall_std"]),
+            "coarse_f1": float(agg_metrics["coarse_f1"]),
+            "coarse_f1_std": float(agg_metrics["coarse_f1_std"]),
+            "fine_accuracy": float(agg_metrics["fine_acc"]),
+            "fine_accuracy_std": float(agg_metrics["fine_acc_std"]),
+            "fine_precision": float(agg_metrics["fine_precision"]),
+            "fine_precision_std": float(agg_metrics["fine_precision_std"]),
+            "fine_recall": float(agg_metrics["fine_recall"]),
+            "fine_recall_std": float(agg_metrics["fine_recall_std"]),
+            "fine_f1": float(agg_metrics["fine_f1"]),
+            "fine_f1_std": float(agg_metrics["fine_f1_std"]),
+            "hierarchical_consistency": float(agg_metrics["consistency"]),
+            "hierarchical_consistency_std": float(agg_metrics["consistency_std"]),
         }
         all_results.append(result_dict)
-
-        # Save per-variant full report
-        variant_log_path = (
-            out_dir / f"evaluation_{args.split}_multiclass_ablation_{key}.txt"
-        )
-        with open(variant_log_path, "w", encoding="utf-8") as f:
-            f.write(f"Evaluating split: {args.split}\n")
-            f.write(f"Variant: {key} ({ablation_cfg.description})\n")
-            f.write(f"Loaded checkpoint: {checkpoint_path}\n\n")
-            f.write("=== COARSE (Binary) ===\n")
-            f.write(f"Accuracy: {metrics['coarse_acc']:.4f}\n")
-            f.write(f"Precision (macro): {metrics['coarse_precision']:.4f}\n")
-            f.write(f"Recall (macro): {metrics['coarse_recall']:.4f}\n")
-            f.write(f"F1 (macro): {metrics['coarse_f1']:.4f}\n\n")
-            f.write("=== FINE-GRAINED (8-class) ===\n")
-            f.write(f"Accuracy: {metrics['fine_acc']:.4f}\n")
-            f.write(f"Precision (macro): {metrics['fine_precision']:.4f}\n")
-            f.write(f"Recall (macro): {metrics['fine_recall']:.4f}\n")
-            f.write(f"F1 (macro): {metrics['fine_f1']:.4f}\n")
-            f.write(f"Hierarchical Consistency: {metrics['consistency']:.4f}\n\n")
-
-            f.write("=== COARSE Classification Report ===\n")
-            f.write(
-                classification_report(
-                    metrics["coarse_true"],
-                    metrics["coarse_pred"],
-                    target_names=[COARSE_LABELS[i] for i in range(2)],
-                    digits=4,
-                    zero_division=0,
-                )
-                + "\n"
-            )
-
-            f.write("=== FINE-GRAINED Classification Report ===\n")
-            f.write(
-                classification_report(
-                    metrics["flat_fine_true"],
-                    metrics["flat_fine_pred"],
-                    target_names=[FINE_LABELS[i] for i in range(TOTAL_FINE_CLASSES)],
-                    digits=4,
-                    zero_division=0,
-                )
-                + "\n"
-            )
-
-        # Save per-record detailed results for this variant
-        detail_json_path = out_dir / f"evaluation_{args.split}_multiclass_ablation_{key}_details.json"
-        with open(detail_json_path, "w", encoding="utf-8") as f:
-            json.dump(metrics["detailed_results"], f, indent=2, ensure_ascii=False)
-        
-        detail_csv_path = out_dir / f"evaluation_{args.split}_multiclass_ablation_{key}_details.csv"
-        with open(detail_csv_path, "w", encoding="utf-8", newline="") as f:
-            writer = csv.DictWriter(
-                f,
-                fieldnames=[
-                    "index",
-                    "claim_id",
-                    "claim",
-                    "rating",
-                    "url",
-                    "coarse_true",
-                    "coarse_true_name",
-                    "coarse_pred",
-                    "coarse_pred_name",
-                    "coarse_confidence",
-                    "coarse_correct",
-                    "fine_true",
-                    "fine_true_name",
-                    "fine_pred",
-                    "fine_pred_name",
-                    "fine_confidence",
-                    "fine_correct",
-                ],
-            )
-            writer.writeheader()
-            writer.writerows(metrics["detailed_results"])
-
-        del model
-        torch.cuda.empty_cache()
 
     if not all_results:
         print("\nNo variants were evaluated (checkpoints might be missing).")
         return
 
     # ── Summary table ──
-    print(f"\n{'═' * 130}")
+    print(f"\n{'═' * 160}")
     print(f"  MULTICLASS ABLATION EVALUATION SUMMARY ({args.split.upper()} SPLIT)")
-    print(f"{'═' * 130}")
+    print(f"{'═' * 160}")
     print(
         f"{'Variant':<8} {'Description':<45} "
-        f"{'C-Acc':>7} {'C-Prec':>7} {'C-Rec':>7} {'C-F1':>7} | "
-        f"{'F-Acc':>7} {'F-Prec':>7} {'F-Rec':>7} {'F-F1':>7}"
+        f"{'C-Acc':>13} {'C-Prec':>13} {'C-Rec':>13} {'C-F1':>13} | "
+        f"{'F-Acc':>13} {'F-Prec':>13} {'F-Rec':>13} {'F-F1':>13}"
     )
     print(
         f"{'─' * 8} {'─' * 45} "
-        f"{'─' * 7} {'─' * 7} {'─' * 7} {'─' * 7}   "
-        f"{'─' * 7} {'─' * 7} {'─' * 7} {'─' * 7}"
+        f"{'─' * 13} {'─' * 13} {'─' * 13} {'─' * 13}   "
+        f"{'─' * 13} {'─' * 13} {'─' * 13} {'─' * 13}"
     )
     for r in all_results:
         print(
             f"{r['variant']:<8} {r['description']:<45} "
-            f"{r['coarse_accuracy']:>7.4f} {r['coarse_precision']:>7.4f} "
-            f"{r['coarse_recall']:>7.4f} {r['coarse_f1']:>7.4f} | "
-            f"{r['fine_accuracy']:>7.4f} {r['fine_precision']:>7.4f} "
-            f"{r['fine_recall']:>7.4f} {r['fine_f1']:>7.4f}"
+            f"{r['coarse_accuracy']:>5.4f}±{r['coarse_accuracy_std']:<5.4f}  "
+            f"{r['coarse_precision']:>5.4f}±{r['coarse_precision_std']:<5.4f}  "
+            f"{r['coarse_recall']:>5.4f}±{r['coarse_recall_std']:<5.4f}  "
+            f"{r['coarse_f1']:>5.4f}±{r['coarse_f1_std']:<5.4f} | "
+            f"{r['fine_accuracy']:>5.4f}±{r['fine_accuracy_std']:<5.4f}  "
+            f"{r['fine_precision']:>5.4f}±{r['fine_precision_std']:<5.4f}  "
+            f"{r['fine_recall']:>5.4f}±{r['fine_recall_std']:<5.4f}  "
+            f"{r['fine_f1']:>5.4f}±{r['fine_f1_std']:<5.4f}"
         )
-    print(f"{'═' * 130}\n")
+    print(f"{'═' * 160}\n")
 
     # Save summary
     summary_json_path = out_dir / f"ablation_evaluation_summary_{args.split}.json"
@@ -460,11 +403,11 @@ def main():
             f.write(
                 f"| {r['variant']} | {r['description']} | "
                 f"{r['trainable_params']:,} | "
-                f"{r['coarse_accuracy']:.4f} | {r['coarse_precision']:.4f} | "
-                f"{r['coarse_recall']:.4f} | {r['coarse_f1']:.4f} | "
-                f"{r['fine_accuracy']:.4f} | {r['fine_precision']:.4f} | "
-                f"{r['fine_recall']:.4f} | {r['fine_f1']:.4f} | "
-                f"{r['hierarchical_consistency']:.4f} |\n"
+                f"{r['coarse_accuracy']:.4f}±{r['coarse_accuracy_std']:.4f} | {r['coarse_precision']:.4f}±{r['coarse_precision_std']:.4f} | "
+                f"{r['coarse_recall']:.4f}±{r['coarse_recall_std']:.4f} | {r['coarse_f1']:.4f}±{r['coarse_f1_std']:.4f} | "
+                f"{r['fine_accuracy']:.4f}±{r['fine_accuracy_std']:.4f} | {r['fine_precision']:.4f}±{r['fine_precision_std']:.4f} | "
+                f"{r['fine_recall']:.4f}±{r['fine_recall_std']:.4f} | {r['fine_f1']:.4f}±{r['fine_f1_std']:.4f} | "
+                f"{r['hierarchical_consistency']:.4f}±{r['hierarchical_consistency_std']:.4f} |\n"
             )
 
     print(f"✓ Output saved to {out_dir}")
