@@ -105,8 +105,8 @@ def resolve_keyframe_path(claim_id: str, data_path: str = DATA_PATH) -> list:
 
     root = Path(data_path)
     candidates = [
-        root / "clip_64" / "train_val_output" / claim_id,
-        root / "clip_64" / "test_output" / claim_id,
+        root / "clip_16_training" / "train_val_output" / claim_id,
+        root / "clip_16" / "test_output" / claim_id,
     ]
     frames = []
     for path in candidates:
