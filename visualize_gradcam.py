@@ -19,6 +19,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from PIL import Image
+from tqdm import tqdm
 
 from models.model import CrossTransVFC, MMConfig
 from models.model_multiclass import HierarchicalCrossTransVFC
@@ -186,33 +187,59 @@ def save_visualizations(result, images, image_paths, processor, output_dir):
         json.dump(summary, file, ensure_ascii=False, indent=2)
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--checkpoint", required=True)
-    parser.add_argument("--sample-json", required=True, help="One TRUE dataset record, e.g. data/TRUE_Dataset/test/10156802.json")
-    parser.add_argument("--data-root", default="data/TRUE_Dataset")
-    parser.add_argument("--images", nargs="+", help="Override keyframes with these image paths, in the given order")
-    parser.add_argument("--head", choices=("coarse", "fine"), default="coarse")
-    parser.add_argument("--class-index", type=int, help="Default: predicted class. Fine indices are flat (0-7).")
-    parser.add_argument("--output-dir", default="plots/gradcam")
-    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    args = parser.parse_args()
-
-    with open(args.sample_json, encoding="utf-8") as file:
+def visualize_sample(model, args, sample_path, output_dir, label2id):
+    with open(sample_path, encoding="utf-8") as file:
         sample = json.load(file)
     claim = clean_data(sample.get("claim", ""))
     if not claim:
-        parser.error("The sample must contain a non-empty claim.")
+        raise ValueError("The sample must contain a non-empty claim.")
     # Match test_multiclass.py: the evidence branch receives article content.
     evidence = clean_data(sample.get("content", ""))
     claim_id = str(sample.get("video_information", {}).get("video_id", ""))
     image_paths = args.images or resolve_keyframe_path(claim_id, args.data_root)
     if not image_paths:
-        parser.error("No keyframes found; supply --images with local image paths.")
+        raise ValueError("No keyframes found for this sample.")
     images = []
     for path in image_paths:
         with Image.open(path) as image:
             images.append(image.convert("RGB"))
+
+    result = explain(model, claim, evidence, images, args.head, args.class_index)
+    result.update({"claim": claim, "checkpoint": args.checkpoint, "sample_json": str(sample_path)})
+    if args.head == "coarse":
+        result["target_label"] = next(
+            (label for label, index in label2id.items() if index == result["target_index"]),
+            str(result["target_index"]),
+        )
+    save_visualizations(result, images, image_paths, model._vision_processor, output_dir)
+    return {
+        "target_index": result["target_index"],
+        "target_probability": result["target_probability"],
+        "num_frames": len(images),
+    }
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--checkpoint", required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--sample-json", help="One TRUE dataset record, e.g. data/TRUE_Dataset/test/10156802.json")
+    source.add_argument("--split", choices=("test",), help="Explain every JSON record in <data-root>/test")
+    parser.add_argument("--data-root", default="data/TRUE_Dataset")
+    parser.add_argument("--images", nargs="+", help="Override keyframes for a single sample, in the given order")
+    parser.add_argument("--head", choices=("coarse", "fine"), default="coarse")
+    parser.add_argument("--class-index", type=int, help="Default: predicted class. Fine indices are flat (0-7).")
+    parser.add_argument("--output-dir", default="plots/gradcam")
+    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    args = parser.parse_args()
+    if args.split:
+        if args.images:
+            parser.error("Use --images only with --sample-json.")
+        sample_paths = sorted((Path(args.data_root) / args.split).glob("*.json"))
+        if not sample_paths:
+            parser.error(f"No JSON records found in {Path(args.data_root) / args.split}.")
+    else:
+        sample_paths = [Path(args.sample_json)]
 
     checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False, mmap=True)
     cfg_fields = {field.name for field in fields(MMConfig)}
@@ -226,6 +253,8 @@ def main():
         )
     else:
         model = CrossTransVFC(cfg)
+    if args.head == "fine" and not hasattr(model, "hierarchical_classifier"):
+        parser.error("The fine head requires a hierarchical checkpoint.")
     # Earlier CLIP checkpoints used one-way fusion. Restore that saved
     # architecture before strict loading rather than changing its weights.
     if "claim_video_trans.cross_attn_layers.0.attn.in_proj_weight" in state_dict:
@@ -239,17 +268,38 @@ def main():
     model.to(args.device)
     label2id = checkpoint.get("label2id", {})
     del checkpoint, state_dict
-    result = explain(model, claim, evidence, images, args.head, args.class_index)
-    result.update({"claim": claim, "checkpoint": args.checkpoint, "sample_json": args.sample_json})
-    if args.head == "coarse":
-        result["target_label"] = next(
-            (label for label, index in label2id.items() if index == result["target_index"]),
-            str(result["target_index"]),
-        )
-    save_visualizations(result, images, image_paths, model._vision_processor, args.output_dir)
-    print(f"Target: {result['head']} class {result['target_index']}, p={result['target_probability']:.4f}")
-    print(f"Saved {len(images)} Grad-CAM images, {len(result['attention'])} attention figures, and raw maps to {args.output_dir}")
+    records = []
+    for sample_path in tqdm(sample_paths, desc="Grad-CAM test", unit="sample", disable=not args.split):
+        output_dir = Path(args.output_dir) / sample_path.stem if args.split else Path(args.output_dir)
+        record = {"sample_json": str(sample_path), "output_dir": str(output_dir)}
+        try:
+            record.update(visualize_sample(model, args, sample_path, output_dir, label2id))
+            record["status"] = "success"
+        except Exception as error:
+            if not args.split:
+                raise
+            plt.close("all")
+            record.update({"status": "error", "error": f"{type(error).__name__}: {error}"})
+            tqdm.write(f"ERROR {sample_path.name}: {error}")
+        records.append(record)
+
+    failed = sum(record["status"] == "error" for record in records)
+    if args.split:
+        output_root = Path(args.output_dir)
+        output_root.mkdir(parents=True, exist_ok=True)
+        manifest = {
+            "checkpoint": args.checkpoint, "split": args.split, "head": args.head,
+            "total": len(records), "succeeded": len(records) - failed, "failed": failed,
+            "samples": records,
+        }
+        with open(output_root / "manifest.json", "w", encoding="utf-8") as file:
+            json.dump(manifest, file, ensure_ascii=False, indent=2)
+        print(f"Completed test split: {len(records) - failed}/{len(records)} succeeded, {failed} failed.")
+    else:
+        print(f"Target: {args.head} class {records[0]['target_index']}, p={records[0]['target_probability']:.4f}")
+    print(f"Saved Grad-CAM images, attention figures, and raw maps to {args.output_dir}")
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
