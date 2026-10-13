@@ -72,6 +72,8 @@ class CrossAttention(nn.Module):
         )
         self.norm2 = nn.LayerNorm(d_model)
         self.dropout = nn.Dropout(dropout)
+        self.capture_attention = False
+        self.attention_weights = None
 
     def forward(
         self,
@@ -80,13 +82,31 @@ class CrossAttention(nn.Module):
         v: torch.Tensor,
         k_padding_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        attn_out, _ = self.attn(
+        attn_out, weights = self.attn(
             query=q,
             key=k,
             value=v,
             key_padding_mask=k_padding_mask,
-            need_weights=False,
+            need_weights=self.capture_attention,
+            average_attn_weights=False,
         )
+        if self.capture_attention:
+            # Use the returned weights in the output graph so their gradients
+            # describe the classifier score, rather than an unused view.
+            self.attention_weights = weights
+            d_model = self.attn.embed_dim
+            values = F.linear(
+                v,
+                self.attn.in_proj_weight[2 * d_model :],
+                self.attn.in_proj_bias[2 * d_model :],
+            )
+            values = values.reshape(
+                v.size(0), v.size(1), self.attn.num_heads, d_model // self.attn.num_heads
+            ).transpose(1, 2)
+            attn_out = (weights @ values).transpose(1, 2).reshape(
+                q.size(0), q.size(1), d_model
+            )
+            attn_out = self.attn.out_proj(attn_out)
         x = self.norm1(q + self.dropout(attn_out))
         x = self.norm2(x + self.ff(x))
         return x

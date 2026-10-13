@@ -176,9 +176,9 @@ def clip_chunk_keyframes_extraction(
     else:
         target_path = Path(output_dir) / video_path.stem
 
-    # if target_path.exists() and len(list(target_path.glob("*.jpeg"))) >= chunk_count:
-    #     logging.info("Keyframes already extracted and present in %s", target_path)
-    #     return str(target_path)
+    if target_path.exists() and len(list(target_path.glob("*.jpeg"))) >= chunk_count:
+        logging.info("Keyframes already extracted and present in %s", target_path)
+        return str(target_path)
 
     cap = cv2.VideoCapture(str(video_file_path))
     if not cap.isOpened():
@@ -191,8 +191,6 @@ def clip_chunk_keyframes_extraction(
 
     chunk_count = min(chunk_count, total_frames)
     chunk_size = total_frames / chunk_count
-
-    print(f"Using device: {device}")
 
     target_path.mkdir(parents=True, exist_ok=True)
     saved = 0
@@ -243,21 +241,23 @@ def process_folder_videos(args):
     test_annotation = dataset_root / DATASET_CONFIG["annotation"][args.split]
     test_video_dir = dataset_root / DATASET_CONFIG["video_dir"][args.split]
 
-    test_output_dir = output_root / DATASET_CONFIG["output_dir"][args.split]
+    test_output_dir = (
+        output_root / "clip_64_training" / DATASET_CONFIG["output_dir"][args.split]
+    )
 
     test_output_dir.mkdir(parents=True, exist_ok=True)
 
     with open(test_annotation, "r") as f:
         video_ids = [line.strip() for line in f if line.strip()]
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    # device = "cpu"
+    # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = "cpu"
     model_name = VIDEO_DESCRIPTOR_CONFIG.get(
         "clip_model_name", "openai/clip-vit-base-patch32"
     )
     processor, model = _load_clip_vision(model_name)
     model.to(device)
-    with open("clipchunk_time.csv", "w", newline="") as f:
+    with open("clipchunk_time_64_training.csv", "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["video_id", "time", "video_length"])
         for i, video_id in tqdm(
@@ -415,7 +415,9 @@ def katna_process_folder(args):
                     cap.release()
                     max_dim = max(width, height)
                     if max_dim >= 3840:
-                        logging.warning(f"Skipping video {video_id} due to large resolution: {width}x{height}")
+                        logging.warning(
+                            f"Skipping video {video_id} due to large resolution: {width}x{height}"
+                        )
                         resolution_too_large = True
 
                 if resolution_too_large:
@@ -451,18 +453,23 @@ def _extract_image_features(
     processor,
     image,
     device,
+    grad_enabled=False,
 ):
     try:
         inputs = processor(images=image, return_tensors="pt")
         inputs = {k: v.to(device) for k, v in inputs.items()}
 
-        with torch.no_grad():
+        with torch.set_grad_enabled(grad_enabled):
+            if grad_enabled:
+                # Frozen CLIP weights still need an input graph for Grad-CAM.
+                inputs["pixel_values"].requires_grad_(True)
             if getattr(model, "feature_method", None):
                 method = getattr(model, model.feature_method)
                 features = method(**inputs)
             elif hasattr(model, "get_image_features"):
                 features = model.get_image_features(**inputs)
-                features = features.pooler_output
+                if not isinstance(features, torch.Tensor):
+                    features = features.pooler_output
             else:
                 outputs = model(**inputs)
                 features = outputs.last_hidden_state[:, 0, :]
@@ -477,7 +484,8 @@ def _extract_image_features(
 
         return features.squeeze(0)  # [T, D] or [D]
     except Exception as e:
-        print(e)
+        if grad_enabled:
+            raise
         return None
 
 
@@ -505,7 +513,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--method",
         type=str,
-        default="katna",
+        default="clip",
         choices=["katna", "clip"],
         help="Method to extract keyframes",
     )

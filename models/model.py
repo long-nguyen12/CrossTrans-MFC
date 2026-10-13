@@ -412,6 +412,7 @@ class CrossTransVFC(nn.Module):
                             self._vision_processor,
                             single_img,
                             device,
+                            grad_enabled=getattr(self, "image_grad_enabled", False),
                         )
                         if f is not None:
                             if f.dim() == 1:
@@ -437,6 +438,7 @@ class CrossTransVFC(nn.Module):
                         self._vision_processor,
                         _img,
                         device,
+                        grad_enabled=getattr(self, "image_grad_enabled", False),
                     )
                     if image_feat is None:
                         raise ValueError(f"Feature extraction failed for {img_item}")
@@ -450,6 +452,8 @@ class CrossTransVFC(nn.Module):
                 image_feat = image_feat.to(device)
                 image_mask = torch.ones(image_feat.shape[0], device=device)  # [T]
             except Exception:
+                if getattr(self, "image_grad_enabled", False):
+                    raise
                 image_feat = torch.zeros(1, image_hidden_dim, device=device)  # [1, D]
                 image_mask = torch.zeros(1, device=device)  # [1]
 
